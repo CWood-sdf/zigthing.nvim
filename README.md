@@ -23,7 +23,7 @@ This plugin requires that your build.zig has a check step:
 
 Currently the only feature is that it starts the process when you enter a zig file
 
-This process will not stop until you quit neovim or it dies unexpectedly
+This process will not stop until it dies or until neovim dies/exits
 
 ## Installation
 
