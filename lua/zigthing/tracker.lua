@@ -1,6 +1,10 @@
+---@class ZigThing.Project.ClosureData
+---@field cancelling boolean
+
 ---@class ZigThing.Project
 ---@field cmd vim.SystemObj
 ---@field ev uv.uv_fs_event_t
+---@field data ZigThing.Project.ClosureData
 
 ---@type { [string]: ZigThing.Project }
 local trackingProjects = {}
@@ -40,6 +44,40 @@ local function getRootFor(file)
     return getRootFor(root)
 end
 
+function M.cancelForFile(file)
+    local root = getRootFor(file)
+
+    if root == nil then
+        return
+    end
+
+    if trackingProjects[root] ~= nil then
+        local proj = trackingProjects[root]
+        proj.data.cancelling = true
+        proj.cmd:kill(9)
+    end
+end
+
+---@return string[]
+function M.getActiveProjects()
+    local ret = {}
+    for k, _ in pairs(trackingProjects) do
+        table.insert(ret, k)
+    end
+    return ret
+end
+
+---@param file string
+---@return boolean
+function M.isActive(file)
+    local r = getRootFor(file)
+    if r == nil then
+        return false
+    end
+
+    return trackingProjects[r] ~= nil
+end
+
 local function trackFile(file)
     local ev = uv.new_fs_event()
     if ev == nil then
@@ -53,15 +91,23 @@ local function trackFile(file)
         file,
         {},
         vim.schedule_wrap(function()
-            vim.fn.setqflist({})
-            vim.cmd("cgetfile " .. file)
+            local qf = require("zigthing.qf_parse")
+            local qflist = {}
+            if require("zigthing").getConfig().setQfList then
+                vim.cmd("cgetfile " .. file)
+                qflist = vim.fn.getqflist()
+            else
+                local f = io.open(file, "r")
+                if f == nil then
+                    return
+                end
+                local raw = f:read("*a")
+                for _, entry in ipairs(qf.parse_all(raw)) do
+                    table.insert(qflist, entry)
+                end
+            end
 
-            local qflist = vim.fn.getqflist()
             local ns = vim.api.nvim_create_namespace("zigthing")
-
-            -- for _, v in ipairs(qflist) do
-            --     v.bufnr = vim.api.nvim_buf_from
-            -- end
 
             local diags = vim.diagnostic.fromqflist(qflist)
 
@@ -133,18 +179,29 @@ function M.addFile(filePath)
         "build",
         "check",
         "--watch",
-        "-fincremental",
+        -- "-fincremental",
         "--build-runner",
         getRunner(),
     }
+    vim.print(procInfo)
+    vim.print("@ " .. root)
+    vim.print("E path: " .. errorsTxt)
+    ---@type ZigThing.Project.ClosureData
+    local data = {
+        cancelling = false,
+    }
     ---@type ZigThing.Project
     local proj = {
+        data = data,
         cmd = vim.system(procInfo, {
             env = {
                 ERRORFILE_PATH = errorsTxt,
             },
+            cwd = root,
         }, function()
-            print("PROCESS DIED UNEXPECTEDLY!")
+            if not data.cancelling then
+                print("PROCESS DIED!")
+            end
             uv.fs_event_stop(ev)
             trackingProjects[root] = nil
         end),

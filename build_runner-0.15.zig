@@ -646,7 +646,7 @@ fn prepare(
     }
 }
 
-var errFileBuf: [4096]u8 = undefined;
+var errFileBuf: [1024]u8 = undefined;
 
 fn runStepNames(
     b: *std.Build,
@@ -663,6 +663,7 @@ fn runStepNames(
         filePath,
         .{ .truncate = true },
     );
+    defer errFile.close();
     var errFileW = errFile.writer(&errFileBuf);
     const errFileWriter = &errFileW.interface;
     // do i care about flush errors on this thing? no
