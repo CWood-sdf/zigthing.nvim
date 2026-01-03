@@ -2,8 +2,10 @@ local M = {}
 
 ---@class ZigThing.Config
 ---@field setQfList boolean?
+---@field multiworkspace boolean?
 local Config = {
     setQfList = false,
+    multiworkspace = true,
 }
 
 ---@param opts ZigThing.Config

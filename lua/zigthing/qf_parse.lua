@@ -15,13 +15,17 @@ end
 
 ---Parse one line of Zig build/compiler output.
 ---@param line string
+---@param root string
 ---@return table|nil  -- quickfix-style dictionary
-function M.parse(line)
+function M.parse(line, root)
     local file, lnum, cnum, sev, txt = line:match(PAT)
     if not file then
         return nil
     end
 
+    if not vim.loop.fs_stat(file) then
+        file = root .. "/" .. file
+    end
     local bufnr = get_bufnr(vim.fn.fnamemodify(file, ":p"))
     return {
         bufnr = bufnr,
@@ -39,11 +43,12 @@ end
 
 ---Parse entire stderr string.
 ---@param raw string
+---@param root string
 ---@return table[]  -- array of quickfix-style dictionaries
-function M.parse_all(raw)
+function M.parse_all(raw, root)
     local t = {}
     for line in vim.gsplit(raw, "\n", { plain = true, trimempty = true }) do
-        local entry = M.parse(line)
+        local entry = M.parse(line, root)
         if entry then
             table.insert(t, entry)
         end

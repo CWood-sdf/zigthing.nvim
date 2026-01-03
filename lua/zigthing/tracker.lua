@@ -30,6 +30,9 @@ local cacheDir = vim.fn.stdpath("cache") .. "/zigthing"
 ---@param file string a zig file
 ---@return string?
 local function getRootFor(file)
+    if not require("zigthing").getConfig().multiworkspace then
+        return vim.fn.getcwd()
+    end
     local root = vim.fn.fnamemodify(file, ":h")
     if vim.fn.filereadable(root .. "/" .. "build.zig") == 1 then
         return root
@@ -54,7 +57,14 @@ function M.cancelForFile(file)
     if trackingProjects[root] ~= nil then
         local proj = trackingProjects[root]
         proj.data.cancelling = true
-        proj.cmd:kill(9)
+        local code = 15
+        local children = vim.api.nvim_get_proc_children(proj.cmd.pid)
+        for _, c in ipairs(children) do
+            vim.uv.kill(c, code)
+        end
+        proj.cmd:kill(code)
+        -- vim.uv.kill(proj.cmd.pid, 9)
+        -- vim.uv.kill(proj.cmd.pid, 2)
     end
 end
 
@@ -78,13 +88,17 @@ function M.isActive(file)
     return trackingProjects[r] ~= nil
 end
 
-local function trackFile(file)
+---@param file string
+---@param root string
+---@param ns number
+local function trackFile(file, root, ns)
     local ev = uv.new_fs_event()
     if ev == nil then
         print("no ev created :(")
         return
     end
-    local lastDiags = {}
+    local lastBufs = {}
+    vim.print("Tracking: " .. file)
 
     uv.fs_event_start(
         ev,
@@ -93,21 +107,20 @@ local function trackFile(file)
         vim.schedule_wrap(function()
             local qf = require("zigthing.qf_parse")
             local qflist = {}
-            if require("zigthing").getConfig().setQfList then
-                vim.cmd("cgetfile " .. file)
-                qflist = vim.fn.getqflist()
-            else
-                local f = io.open(file, "r")
-                if f == nil then
-                    return
-                end
-                local raw = f:read("*a")
-                for _, entry in ipairs(qf.parse_all(raw)) do
-                    table.insert(qflist, entry)
-                end
+            -- if require("zigthing").getConfig().setQfList then
+            --     vim.fn.setqflist({})
+            --     vim.cmd("cgetfile " .. file)
+            --     qflist = vim.fn.getqflist()
+            -- else
+            local f = io.open(file, "r")
+            if f == nil then
+                return
             end
-
-            local ns = vim.api.nvim_create_namespace("zigthing")
+            local raw = f:read("*a")
+            for _, entry in ipairs(qf.parse_all(raw, root)) do
+                table.insert(qflist, entry)
+            end
+            -- end
 
             local diags = vim.diagnostic.fromqflist(qflist)
 
@@ -116,10 +129,7 @@ local function trackFile(file)
                 error = vim.diagnostic.severity.ERROR,
             }
 
-            for buf, _ in pairs(lastDiags) do
-                lastDiags[buf] = {}
-            end
-
+            local newDiags = {}
             for _, diag in ipairs(diags) do
                 local msg = diag.message
                 for zigname, level in pairs(levels) do
@@ -129,13 +139,21 @@ local function trackFile(file)
                         break
                     end
                 end
-                lastDiags[diag.bufnr] = lastDiags[diag.bufnr] or {}
-
-                table.insert(lastDiags[diag.bufnr], diag)
+                newDiags[tostring(diag.bufnr)] = newDiags[tostring(diag.bufnr)] or {}
+                table.insert(newDiags[tostring(diag.bufnr)], diag)
             end
 
-            for buf, diag in pairs(lastDiags) do
+            vim.diagnostic.reset(ns)
+            for _, buf in ipairs(lastBufs) do
                 vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+            end
+            lastBufs = {}
+
+            for buf, diag in pairs(newDiags) do
+                buf = buf * 1
+                -- print(buf)
+                -- vim.print(diag)
+                table.insert(lastBufs, buf)
                 vim.diagnostic.set(ns, buf, diag, {})
             end
         end)
@@ -157,6 +175,8 @@ function M.addFile(filePath)
 
     local errorsTxt = vim.fs.normalize(root .. "/zig_errors.txt")
 
+    local ns = vim.api.nvim_create_namespace("zigthing-" .. root)
+
     errorsTxt = errorsTxt
         :gsub("[^%w._-]", "_") -- keep only A-Z a-z 0-9 . _ -
         :gsub("_+", "_") -- collapse runs
@@ -170,8 +190,9 @@ function M.addFile(filePath)
     else
         print("Could not create " .. errorsTxt)
     end
-    local ev = trackFile(errorsTxt)
+    local ev = trackFile(errorsTxt, root, ns)
     if ev == nil then
+        print("Could not track " .. errorsTxt)
         return false
     end
     local procInfo = {
@@ -179,13 +200,13 @@ function M.addFile(filePath)
         "build",
         "check",
         "--watch",
-        -- "-fincremental",
+        "-fincremental",
         "--build-runner",
         getRunner(),
     }
-    vim.print(procInfo)
-    vim.print("@ " .. root)
-    vim.print("E path: " .. errorsTxt)
+    -- vim.print(procInfo)
+    -- vim.print("@ " .. root)
+    -- vim.print("E path: " .. errorsTxt)
     ---@type ZigThing.Project.ClosureData
     local data = {
         cancelling = false,
@@ -193,18 +214,20 @@ function M.addFile(filePath)
     ---@type ZigThing.Project
     local proj = {
         data = data,
-        cmd = vim.system(procInfo, {
-            env = {
-                ERRORFILE_PATH = errorsTxt,
+        cmd = vim.system(
+            procInfo,
+            {
+                env = {
+                    ERRORFILE_PATH = errorsTxt,
+                },
+                cwd = root,
             },
-            cwd = root,
-        }, function()
-            if not data.cancelling then
-                print("PROCESS DIED!")
-            end
-            uv.fs_event_stop(ev)
-            trackingProjects[root] = nil
-        end),
+            vim.schedule_wrap(function()
+                vim.diagnostic.reset(ns)
+                uv.fs_event_stop(ev)
+                trackingProjects[root] = nil
+            end)
+        ),
         ev = ev,
     }
     trackingProjects[root] = proj
